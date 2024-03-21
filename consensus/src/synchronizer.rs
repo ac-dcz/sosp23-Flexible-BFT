@@ -50,7 +50,6 @@ impl Synchronizer {
 
                             let fut = Self::waiter(store_copy.clone(),epoch,height,&committee);
                             waiting.push(fut);
-
                             if !requests.contains_key(&(epoch,height)){
                                 debug!("Requesting sync for block epoch {}, height {}", epoch,height);
                                 let now = SystemTime::now()

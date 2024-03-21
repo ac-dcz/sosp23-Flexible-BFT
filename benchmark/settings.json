@@ -1,0 +1,25 @@
+{
+    "key": {
+        "name": "docker-dcz",
+        "path": "/root/.ssh/id_rsa"
+    },
+    "ports": {
+        "consensus": 8000,
+        "mempool": 7000,
+        "front": 6000
+    },
+    "repo": {
+        "name": "Flexible-HBBFT",
+        "url": "https://github.com/ac-dcz/Flexible-HBBFT",
+        "branch": "main"
+    },
+    "instances": {
+        "type": "m5d.xlarge",
+        "regions": [
+            "us-east-1",
+            "eu-north-1",
+            "ap-northeast-1",
+            "ap-southeast-2",
+        ]
+    }
+}

@@ -331,7 +331,7 @@ impl fmt::Display for PromiseVote {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ABAVal {
     pub author: PublicKey,
-    pub epoch: SeqNumber,
+    pub timestamp: u128,
     pub height: SeqNumber,
     pub round: SeqNumber, //ABA 的轮数
     pub phase: u8,        //ABA 的阶段（VAL，AUX）
@@ -342,7 +342,7 @@ pub struct ABAVal {
 impl ABAVal {
     pub async fn new(
         author: PublicKey,
-        epoch: SeqNumber,
+        timestamp: u128,
         height: SeqNumber,
         round: SeqNumber,
         val: usize,
@@ -351,7 +351,7 @@ impl ABAVal {
     ) -> Self {
         let mut aba_val = Self {
             author,
-            epoch,
+            timestamp,
             height,
             round,
             val,
@@ -366,11 +366,6 @@ impl ABAVal {
         self.signature.verify(&self.digest(), &self.author)?;
         Ok(())
     }
-
-    pub fn rank(&self, committee: &Committee) -> usize {
-        let r = (self.epoch as usize) * committee.size() + (self.height as usize);
-        r
-    }
 }
 
 impl Hash for ABAVal {
@@ -378,7 +373,7 @@ impl Hash for ABAVal {
         let mut hasher = Sha512::new();
         hasher.update(self.author.0);
         hasher.update(self.height.to_le_bytes());
-        hasher.update(self.epoch.to_le_bytes());
+        hasher.update(self.timestamp.to_le_bytes());
         hasher.update(self.round.to_le_bytes());
         Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
     }
@@ -388,8 +383,8 @@ impl fmt::Debug for ABAVal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "ABAVal(author{},epoch {},height {},round {},phase {},val {})",
-            self.author, self.epoch, self.height, self.round, self.phase, self.val
+            "ABAVal(author{},timestamp {},height {},round {},phase {},val {})",
+            self.author, self.timestamp, self.height, self.round, self.phase, self.val
         )
     }
 }
@@ -398,8 +393,8 @@ impl fmt::Display for ABAVal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "ABAVal(author{},epoch {},height {},round {},phase {},val {})",
-            self.author, self.epoch, self.height, self.round, self.phase, self.val
+            "ABAVal(author{},timestamp {},height {},round {},phase {},val {})",
+            self.author, self.timestamp, self.height, self.round, self.phase, self.val
         )
     }
 }
@@ -407,7 +402,7 @@ impl fmt::Display for ABAVal {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ABAOutput {
     pub author: PublicKey,
-    pub epoch: SeqNumber,
+    pub timestamp: u128,
     pub height: SeqNumber,
     pub round: SeqNumber,
     pub val: usize,
@@ -417,7 +412,7 @@ pub struct ABAOutput {
 impl ABAOutput {
     pub async fn new(
         author: PublicKey,
-        epoch: SeqNumber,
+        timestamp: u128,
         height: SeqNumber,
         round: SeqNumber,
         val: usize,
@@ -425,7 +420,7 @@ impl ABAOutput {
     ) -> Self {
         let mut out = Self {
             author,
-            epoch,
+            timestamp,
             height,
             round,
             val,
@@ -439,18 +434,13 @@ impl ABAOutput {
         self.signature.verify(&self.digest(), &self.author)?;
         Ok(())
     }
-
-    pub fn rank(&self, committee: &Committee) -> usize {
-        let r = (self.epoch as usize) * committee.size() + (self.height as usize);
-        r
-    }
 }
 
 impl Hash for ABAOutput {
     fn digest(&self) -> Digest {
         let mut hasher = Sha512::new();
         hasher.update(self.author.0);
-        hasher.update(self.epoch.to_le_bytes());
+        hasher.update(self.timestamp.to_le_bytes());
         hasher.update(self.height.to_le_bytes());
         hasher.update(self.round.to_le_bytes());
         Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
@@ -461,8 +451,8 @@ impl fmt::Debug for ABAOutput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "ABAOutput(author {},epoch {},height {},round {},val {})",
-            self.author, self.epoch, self.height, self.round, self.val
+            "ABAOutput(author {},timestamp {},height {},round {},val {})",
+            self.author, self.timestamp, self.height, self.round, self.val
         )
     }
 }
@@ -472,7 +462,7 @@ impl fmt::Debug for ABAOutput {
 /************************** Share Coin Struct ************************************/
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RandomnessShare {
-    pub epoch: SeqNumber,
+    pub timestamp: u128,
     pub height: SeqNumber,
     pub round: SeqNumber,
     pub author: PublicKey,
@@ -481,7 +471,7 @@ pub struct RandomnessShare {
 
 impl RandomnessShare {
     pub async fn new(
-        epoch: SeqNumber,
+        timestamp: u128,
         height: SeqNumber,
         round: SeqNumber,
         author: PublicKey,
@@ -490,7 +480,7 @@ impl RandomnessShare {
         let mut hasher = Sha512::new();
         hasher.update(round.to_le_bytes());
         hasher.update(height.to_le_bytes());
-        hasher.update(epoch.to_le_bytes());
+        hasher.update(timestamp.to_le_bytes());
         let digest = Digest(hasher.finalize().as_slice()[..32].try_into().unwrap());
         let signature_share = signature_service
             .request_tss_signature(digest)
@@ -499,7 +489,7 @@ impl RandomnessShare {
         Self {
             round,
             height,
-            epoch,
+            timestamp,
             author,
             signature_share,
         }
@@ -527,7 +517,7 @@ impl Hash for RandomnessShare {
         let mut hasher = Sha512::new();
         hasher.update(self.round.to_le_bytes());
         hasher.update(self.height.to_le_bytes());
-        hasher.update(self.epoch.to_le_bytes());
+        hasher.update(self.timestamp.to_le_bytes());
         Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
     }
 }
@@ -536,8 +526,8 @@ impl fmt::Debug for RandomnessShare {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(
             f,
-            "RandomnessShare (author {}, height {},round {})",
-            self.author, self.height, self.round,
+            "RandomnessShare (author {},timestamp {} ,height {},round {})",
+            self.author, self.timestamp, self.height, self.round,
         )
     }
 }

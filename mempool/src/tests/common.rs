@@ -61,7 +61,7 @@ pub fn block() -> Block {
     let (author, secret) = keys().pop().unwrap();
     let block = Block {
         author,
-        epoch: 0,
+        timestamp: 0,
         height: 0,
         payload: Vec::new(),
         signature: Signature::default(),

@@ -1,10 +1,10 @@
 use super::*;
 use crate::common::{block, committee, keys};
+use crypto::Hash;
 use rand::rngs::StdRng;
 use rand::RngCore as _;
 use rand::SeedableRng as _;
 use std::fs;
-
 #[tokio::test]
 async fn verify_empty() {
     let (tx_consensus, _rx_consensus) = channel(1);
@@ -54,9 +54,8 @@ async fn verify_wait() {
         payload: payload.clone(),
         ..block()
     };
-
     let author = block.author;
-    let (epoch, height) = (block.epoch, block.height);
+    let digest = block.digest();
     // Ensure the synchronizer replies with WAIT.
     let result = synchronizer.verify_payload(block).await;
     assert!(result.is_ok());
@@ -82,8 +81,8 @@ async fn verify_wait() {
     let _ = store.write(payload_1.to_vec(), Vec::new()).await;
     let _ = store.write(payload_2.to_vec(), Vec::new()).await;
     match rx_consensus.recv().await {
-        Some(ConsensusMessage::LoopBackMsg(e, h)) => {
-            assert_eq!((e, h), (epoch, height))
+        Some(ConsensusMessage::LoopBackMsg(b)) => {
+            assert_eq!(b.digest(), digest)
         }
         _ => assert!(false),
     }

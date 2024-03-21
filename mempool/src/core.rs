@@ -209,8 +209,8 @@ impl Core {
         self.synchronizer.verify_payload(*block).await
     }
 
-    async fn cleanup(&mut self, digests: Vec<Digest>, epoch: SeqNumber, height: SeqNumber) {
-        self.synchronizer.cleanup(epoch, height).await;
+    async fn cleanup(&mut self, digests: Vec<Digest>, timestamp: u128, height: SeqNumber) {
+        self.synchronizer.cleanup(timestamp, height).await;
         for x in &digests {
             self.queue.remove(x);
         }
@@ -250,7 +250,7 @@ impl Core {
                             };
                             let _ = sender.send(status);
                         },
-                        ConsensusMempoolMessage::Cleanup(digests,epoch,height) => self.cleanup(digests,epoch,height).await,//
+                        ConsensusMempoolMessage::Cleanup(digests,timestamp,height) => self.cleanup(digests,timestamp,height).await,//
                     }
                     Ok(())
                 },

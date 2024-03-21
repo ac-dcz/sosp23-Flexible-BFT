@@ -21,7 +21,7 @@ pub mod synchronizer_tests;
 
 enum SynchronizerMessage {
     Sync(HashSet<Digest>, Block),
-    Clean(SeqNumber, SeqNumber),
+    Clean(u128, SeqNumber),
 }
 
 pub struct Synchronizer {
@@ -43,7 +43,7 @@ impl Synchronizer {
         let store_copy = store.clone();
         tokio::spawn(async move {
             let mut waiting = FuturesUnordered::new();
-            let mut pending: HashMap<(SeqNumber, SeqNumber), Sender<()>> = HashMap::new();
+            let mut pending: HashMap<(u128, SeqNumber), Sender<()>> = HashMap::new();
             let mut requests = HashMap::new();
 
             let timer = sleep(Duration::from_millis(5000));
@@ -54,14 +54,14 @@ impl Synchronizer {
                         SynchronizerMessage::Sync(mut missing, block) => {//等待缺失的payload
                             // TODO [issue #7]: A bad node may make us run out of memory by sending many blocks
                             // with different round numbers or different payloads.
-                            let (epoch,height) = (block.epoch,block.height);
+                            let (ts,height) = (block.timestamp,block.height);
                             let author = block.author;
-                            if pending.contains_key(&(epoch,height)) {    //如果处理过，就不用在处理了
+                            if pending.contains_key(&(ts,height)) {    //如果处理过，就不用在处理了
                                 continue;
                             }
                             let wait_for = missing.iter().cloned().map(|x| (x, store_copy.clone())).collect();
                             let (tx_cancel, rx_cancel) = channel(1);
-                            pending.insert((epoch,height),  tx_cancel);
+                            pending.insert((ts,height),  tx_cancel);
                             let fut = Self::waiter(wait_for, block, rx_cancel);//等待其他发送缺失的payload，然后从本地的store中取出
                             waiting.push(fut);//存入等待队列中
 
@@ -75,7 +75,7 @@ impl Synchronizer {
                                     .expect("Failed to measure time")
                                     .as_millis();
                                 for x in &missing {
-                                    requests.insert(x.clone(), (epoch,height, now));
+                                    requests.insert(x.clone(), (ts,height, now));
                                 }
 
                                 let message = MempoolMessage::PayloadRequest(missing.clone(), name); //向发送block的节点请求payload
@@ -90,28 +90,26 @@ impl Synchronizer {
                                 .expect("Failed to send payload sync request");
                             }
                         },
-                        SynchronizerMessage::Clean(epoch,height) => {//将小于等于 round 轮的请求都清除
-                            let size = committee.size() as u64;
-                            let rank = epoch*size+height;
-                            for ((e,h),handler) in &pending {
-                                if e*size+h <= rank {
+                        SynchronizerMessage::Clean(timestamp,height) => {//将小于等于 round 轮的请求都清除
+                            for ((ts,h),handler) in &pending {
+                                if *ts<timestamp || (timestamp == *ts && *h< height) {
                                     let _ = handler.send(()).await;
                                 }
                             }
-                            pending.retain(|(e,h), _| e*size+h > rank);
-                            requests.retain(|_, (e,h,_)| (*e)*size+(*h) > rank);
+                            pending.retain(|(ts,h), _| *ts>timestamp || (timestamp == *ts && *h> height));
+                            requests.retain(|_, (ts,h,_)| *ts>timestamp || (timestamp == *ts && *h> height));
                         }
                     },
                     Some(result) = waiting.next() => { //等待请求有结果了
                         match result {
                             Ok(Some(block)) => {
                                 debug!("mempool sync loopback block {:?}", block);
-                                let _ = pending.remove(&(block.epoch,block.height));
+                                let _ = pending.remove(&(block.timestamp,block.height));
                                 for x in &block.payload {//将已经收到的payload去除
                                     let _ = requests.remove(x);
                                 }
-                                info!("loop back block epoch {} height {}",block.epoch,block.height);
-                                let message = ConsensusMessage::LoopBackMsg(block.epoch,block.height);
+                                info!("loop back block timestamp {} height {}",block.timestamp,block.height);
+                                let message = ConsensusMessage::LoopBackMsg(block);
                                 if let Err(e) = consensus_channel.send(message).await {
                                     panic!("Failed to send message to consensus: {}", e);
                                 }
@@ -208,7 +206,10 @@ impl Synchronizer {
         if missing.is_empty() {
             return Ok(true);
         }
-        info!("miss block epoch {} height {}", block.epoch, block.height);
+        info!(
+            "miss block timestamp {} height {}",
+            block.timestamp, block.height
+        );
         let message = SynchronizerMessage::Sync(missing, block);
         if let Err(e) = self.inner_channel.send(message).await {
             panic!("Failed to send message to synchronizer core: {}", e);
@@ -216,9 +217,9 @@ impl Synchronizer {
         Ok(false)
     }
 
-    pub async fn cleanup(&mut self, epoch: SeqNumber, height: SeqNumber) {
-        let message = SynchronizerMessage::Clean(epoch, height);
-        debug!("cleanup epoch {} height {}", epoch, height);
+    pub async fn cleanup(&mut self, timestamp: u128, height: SeqNumber) {
+        let message = SynchronizerMessage::Clean(timestamp, height);
+        debug!("cleanup timestamp {} height {}", timestamp, height);
         if let Err(e) = self.inner_channel.send(message).await {
             panic!("Failed to send message to synchronizer core: {}", e);
         }

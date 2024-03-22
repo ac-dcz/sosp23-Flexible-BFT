@@ -1,4 +1,5 @@
 use crate::aggregator::Aggregator;
+use crate::commitor::Commitor;
 use crate::config::{Committee, Parameters, Stake};
 use crate::error::{ConsensusError, ConsensusResult};
 use crate::filter::FilterInput;
@@ -18,7 +19,7 @@ use std::fmt::Debug;
 use std::time::{SystemTime, UNIX_EPOCH};
 use store::Store;
 use threshold_crypto::PublicKeySet;
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::time::{sleep, Duration};
 #[cfg(test)]
 #[path = "tests/core_tests.rs"]
@@ -48,6 +49,7 @@ pub enum ConsensusMessage {
     ABAPromMsg(ABAVal),
     ABACoinShareMsg(RandomnessShare),
     ABAOutputMsg(ABAOutput),
+    NotifyPassMsg(u128),
     LoopBackMsg(Block),
     SyncRequestMsg(Digest, PublicKey),
     SyncReplyMsg(Block),
@@ -62,6 +64,8 @@ pub struct Core {
     pk_set: PublicKeySet,
     mempool_driver: MempoolDriver,
     synchronizer: Synchronizer,
+    commitor: Commitor,
+    rx_clean: Receiver<(Vec<Digest>, u128, SeqNumber)>,
     tx_core: Sender<ConsensusMessage>,
     rx_core: Receiver<ConsensusMessage>,
     network_filter: Sender<FilterInput>,
@@ -97,6 +101,8 @@ impl Core {
         network_filter: Sender<FilterInput>,
         commit_channel: Sender<Block>,
     ) -> Self {
+        let (tx_clean, rx_clean): (_, Receiver<(Vec<Digest>, u128, SeqNumber)>) = channel(1000);
+        let commitor = Commitor::new(tx_core.clone(), committee.clone(), store.clone(), tx_clean);
         let aggregator = Aggregator::new(name, committee.clone());
         Self {
             pass_ts: 0,
@@ -111,6 +117,8 @@ impl Core {
             synchronizer,
             network_filter,
             _commit_channel: commit_channel,
+            commitor,
+            rx_clean,
             tx_core,
             rx_core,
             aggregator,
@@ -143,32 +151,6 @@ impl Core {
         let key = block.digest().to_vec();
         let value = bincode::serialize(block).expect("Failed to serialize block");
         self.store.write(key, value).await;
-    }
-
-    async fn commit(&mut self, _blocks: Vec<Block>) -> ConsensusResult<()> {
-        // if blocks.len() > 0 {
-        //     let epoch = blocks[0].epoch;
-        //     let mut digest: Vec<Digest> = Vec::new();
-        //     for block in blocks {
-        //         if !block.payload.is_empty() {
-        //             info!("Committed {}", block);
-
-        //             #[cfg(feature = "benchmark")]
-        //             for x in &block.payload {
-        //                 info!(
-        //                     "Committed B{}({}) epoch {}",
-        //                     block.height,
-        //                     base64::encode(x),
-        //                     block.epoch,
-        //                 );
-        //             }
-        //         }
-        //         digest.append(&mut block.payload.clone());
-        //         debug!("Committed {}", block);
-        //     }
-        //     self.cleanup(digest, epoch).await?;
-        // }
-        Ok(())
     }
 
     async fn cleanup(
@@ -709,7 +691,9 @@ impl Core {
     /************* FastBA Protocol ******************/
 
     /***************PASS mechanism********************/
-
+    async fn handle_notify_pass(&mut self, ts: u128) -> ConsensusResult<()> {
+        Ok(())
+    }
     /***************PASS mechanism********************/
 
     async fn handle_sync_request(
@@ -744,36 +728,6 @@ impl Core {
         Ok(())
     }
 
-    pub async fn handle_epoch_end(&mut self, _epoch: SeqNumber) -> ConsensusResult<()> {
-        // let mut data: Vec<Block> = Vec::new();
-
-        // for height in 0..(self.committee.size() as SeqNumber) {
-        //     if *self.aba_ends.get(&(epoch, height)).unwrap() == OPT {
-        //         if let Some(block) = self
-        //             .synchronizer
-        //             .block_request(epoch, height, &self.committee)
-        //             .await?
-        //         {
-        //             if !self.mempool_driver.verify(block.clone()).await? {
-        //                 return Ok(());
-        //             }
-        //             data.push(block);
-        //         }
-        //     }
-        // }
-        // self.commit(data).await?;
-        // self.advance_epoch(epoch + 1).await?;
-        Ok(())
-    }
-
-    pub async fn advance_epoch(&mut self, epoch: SeqNumber) -> ConsensusResult<()> {
-        // if epoch > self.epoch {
-        //     self.epoch = epoch;
-        //     self.generate_rbc_proposal().await?;
-        // }
-        Ok(())
-    }
-
     pub async fn run(&mut self) {
         if let Err(e) = self.generate_arbc_proposal().await {
             panic!("protocol invoke failed! error {}", e);
@@ -794,6 +748,7 @@ impl Core {
                         ConsensusMessage::LoopBackMsg(block) => self.handle_negotiation_loopback(&block).await,
                         ConsensusMessage::SyncRequestMsg(digest, sender) => self.handle_sync_request(digest, sender).await,
                         ConsensusMessage::SyncReplyMsg(block) => self.handle_sync_reply(&block).await,
+                        ConsensusMessage::NotifyPassMsg(ts)=> self.handle_notify_pass(ts).await,
                         ConsensusMessage::SuperMVDelayMsg(proposal,timeout)=>{
                             pending_super_mv.push(Self::delay_super_mv(proposal, timeout));
                             Ok(())
@@ -803,6 +758,9 @@ impl Core {
                 },
                 Some(proposal) = pending_super_mv.next()=>{
                     self.handle_negotiation_proposal(&proposal).await
+                },
+                Some((digests,ts,g)) = self.rx_clean.recv()=>{
+                    self.cleanup(digests,ts,g).await
                 },
                 else => break,
             };

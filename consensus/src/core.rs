@@ -4,7 +4,7 @@ use crate::error::{ConsensusError, ConsensusResult};
 use crate::filter::FilterInput;
 use crate::mempool::MempoolDriver;
 use crate::messages::{
-    self, ABAOutput, ABAVal, Block, EndorseVote, PromiseVote, Proposal, RandomnessShare,
+    ABAOutput, ABAVal, Block, EndorseVote, PromiseVote, Proposal, RandomnessShare,
 };
 use crate::synchronizer::Synchronizer;
 use async_recursion::async_recursion;
@@ -189,7 +189,7 @@ impl Core {
 
     /************* fast negotiation Protocol ******************/
     #[async_recursion]
-    async fn generate_rbc_proposal(&mut self) -> ConsensusResult<Block> {
+    async fn generate_arbc_proposal(&mut self) -> ConsensusResult<Block> {
         // Make a new block.
         let payload = self
             .mempool_driver
@@ -345,7 +345,18 @@ impl Core {
         vote.verify(&self.committee)?;
         if let Some(signal) = self.aggregator.add_arbc_promise_vote(vote)? {
             //end
+            self.process_negotiation_output(vote.timestamp, vote.height, signal)
+                .await?;
         }
+        Ok(())
+    }
+
+    async fn process_negotiation_output(
+        &mut self,
+        timestamp: u128,
+        height: SeqNumber,
+        signal: u8,
+    ) -> ConsensusResult<()> {
         Ok(())
     }
 
@@ -764,7 +775,7 @@ impl Core {
     }
 
     pub async fn run(&mut self) {
-        if let Err(e) = self.generate_rbc_proposal().await {
+        if let Err(e) = self.generate_arbc_proposal().await {
             panic!("protocol invoke failed! error {}", e);
         }
         let mut pending_super_mv = FuturesUnordered::new();

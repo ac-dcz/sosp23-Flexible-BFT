@@ -51,7 +51,7 @@ pub enum ConsensusMessage {
     ABAOutputMsg(ABAOutput),
     NotifyPassMsg(u128),
     LoopBackMsg(Block),
-    SyncRequestMsg(Digest, PublicKey),
+    SyncRequestMsg(u128, SeqNumber, PublicKey),
     SyncReplyMsg(Block),
 }
 
@@ -72,17 +72,20 @@ pub struct Core {
     _commit_channel: Sender<Block>,
     height: SeqNumber,
     pass_ts: u128,
+    all_pass_ts: Vec<u128>,
     aggregator: Aggregator,
     arbc_proposal: HashMap<(u128, SeqNumber), Digest>,
     arbc_endorse: HashSet<(u128, SeqNumber)>,
+    arbc_output_flag: HashSet<(u128, SeqNumber)>,
     aba_invoke_flags: HashSet<(u128, SeqNumber)>,
     aba_values: HashMap<(u128, SeqNumber, SeqNumber), [HashSet<PublicKey>; 2]>,
     aba_values_flag: HashMap<(u128, SeqNumber, SeqNumber), [bool; 2]>,
     aba_mux_values: HashMap<(u128, SeqNumber, SeqNumber), [HashSet<PublicKey>; 2]>,
     aba_mux_flags: HashMap<(u128, SeqNumber, SeqNumber), [bool; 2]>,
+    aba_prom_values: HashMap<(u128, SeqNumber, SeqNumber), [HashSet<PublicKey>; 2]>,
+    aba_share_flags: HashSet<(u128, SeqNumber, SeqNumber)>,
     aba_outputs: HashMap<(u128, SeqNumber, SeqNumber), HashSet<PublicKey>>,
     aba_ends: HashMap<(u128, SeqNumber), u8>,
-    aba_ends_nums: HashMap<(u128, u8), HashSet<SeqNumber>>,
 }
 
 impl Core {
@@ -104,7 +107,12 @@ impl Core {
         let (tx_clean, rx_clean): (_, Receiver<(Vec<Digest>, u128, SeqNumber)>) = channel(1000);
         let commitor = Commitor::new(tx_core.clone(), committee.clone(), store.clone(), tx_clean);
         let aggregator = Aggregator::new(name, committee.clone());
+        let mut all_pass_ts = Vec::new();
+        for _ in 0..committee.size() {
+            all_pass_ts.push(0);
+        }
         Self {
+            all_pass_ts,
             pass_ts: 0,
             height: committee.id(name) as u64,
             name,
@@ -124,14 +132,16 @@ impl Core {
             aggregator,
             arbc_proposal: HashMap::new(),
             arbc_endorse: HashSet::new(),
+            arbc_output_flag: HashSet::new(),
             aba_invoke_flags: HashSet::new(),
             aba_values: HashMap::new(),
             aba_mux_values: HashMap::new(),
             aba_values_flag: HashMap::new(),
             aba_mux_flags: HashMap::new(),
+            aba_prom_values: HashMap::new(),
+            aba_share_flags: HashSet::new(),
             aba_outputs: HashMap::new(),
             aba_ends: HashMap::new(),
-            aba_ends_nums: HashMap::new(),
         }
     }
 
@@ -148,6 +158,8 @@ impl Core {
     }
 
     async fn store_block(&mut self, block: &Block) {
+        self.arbc_proposal
+            .insert((block.timestamp, block.height), block.digest());
         let key = block.digest().to_vec();
         let value = bincode::serialize(block).expect("Failed to serialize block");
         self.store.write(key, value).await;
@@ -228,9 +240,10 @@ impl Core {
         }
         let digest = proposal.block.digest();
         self.store_block(&proposal.block).await;
-        self.arbc_proposal
-            .insert((proposal.timestamp, proposal.height), digest.clone());
-
+        // instance uodate
+        self.commitor
+            .add_instance(proposal.timestamp, proposal.height)
+            .await?;
         if proposal.timestamp > self.pass_ts {
             if let Some(vote) = self
                 .make_endorse_vote(proposal.timestamp, proposal.height, digest, ENDORSED)
@@ -337,8 +350,28 @@ impl Core {
         &mut self,
         timestamp: u128,
         height: SeqNumber,
-        signal: u8,
+        tag: u8,
     ) -> ConsensusResult<()> {
+        if !self.arbc_output_flag.contains(&(timestamp, height)) {
+            if tag == PES {
+                self.arbc_output_flag.insert((timestamp, height));
+                self.commitor.add_output(timestamp, height, None).await?;
+            } else {
+                if self.arbc_proposal.contains_key(&(timestamp, height)) {
+                    self.arbc_output_flag.insert((timestamp, height));
+                    let digest = self
+                        .arbc_proposal
+                        .entry((timestamp, height))
+                        .or_insert(Digest::default())
+                        .clone();
+                    self.commitor
+                        .add_output(timestamp, height, Some(digest))
+                        .await?;
+                } else {
+                    self.synchronizer.block_request(timestamp, height).await?;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -430,26 +463,49 @@ impl Core {
 
                 if !values_flag[0] && !values_flag[1] {
                     values_flag[aba_val.val] = true;
-                    let mux = ABAVal::new(
-                        self.name,
-                        aba_val.timestamp,
-                        aba_val.height,
-                        aba_val.round,
-                        aba_val.val,
-                        MUX_PHASE,
-                        self.signature_service.clone(),
-                    )
-                    .await;
-                    let message = ConsensusMessage::ABAMuxMsg(mux.clone());
-                    Synchronizer::transmit(
-                        message,
-                        &self.name,
-                        None,
-                        &self.network_filter,
-                        &self.committee,
-                    )
-                    .await?;
-                    self.handle_aba_mux(&mux).await?;
+                    if !values[1 - aba_val.val].contains(&self.name) {
+                        let prom = ABAVal::new(
+                            self.name,
+                            aba_val.timestamp,
+                            aba_val.height,
+                            aba_val.round,
+                            aba_val.val,
+                            PROM_PHASE,
+                            self.signature_service.clone(),
+                        )
+                        .await;
+                        let message = ConsensusMessage::ABAPromMsg(prom.clone());
+                        Synchronizer::transmit(
+                            message,
+                            &self.name,
+                            None,
+                            &self.network_filter,
+                            &self.committee,
+                        )
+                        .await?;
+                        self.handle_aba_prom(&prom).await?;
+                    } else {
+                        let mux = ABAVal::new(
+                            self.name,
+                            aba_val.timestamp,
+                            aba_val.height,
+                            aba_val.round,
+                            aba_val.val,
+                            MUX_PHASE,
+                            self.signature_service.clone(),
+                        )
+                        .await;
+                        let message = ConsensusMessage::ABAMuxMsg(mux.clone());
+                        Synchronizer::transmit(
+                            message,
+                            &self.name,
+                            None,
+                            &self.network_filter,
+                            &self.committee,
+                        )
+                        .await?;
+                        self.handle_aba_mux(&mux).await?;
+                    }
                 } else {
                     values_flag[aba_val.val] = true;
                 }
@@ -493,24 +549,8 @@ impl Core {
                 }
 
                 if mux_flags[0] || mux_flags[1] {
-                    let share = RandomnessShare::new(
-                        aba_mux.timestamp,
-                        aba_mux.height,
-                        aba_mux.round,
-                        self.name,
-                        self.signature_service.clone(),
-                    )
-                    .await;
-                    let message = ConsensusMessage::ABACoinShareMsg(share.clone());
-                    Synchronizer::transmit(
-                        message,
-                        &self.name,
-                        None,
-                        &self.network_filter,
-                        &self.committee,
-                    )
-                    .await?;
-                    self.handle_aba_share(&share).await?;
+                    self.invoke_random_share_coin(aba_mux.timestamp, aba_mux.height, aba_mux.round)
+                        .await?;
                 }
             }
         }
@@ -519,6 +559,86 @@ impl Core {
     }
 
     async fn handle_aba_prom(&mut self, aba_prom: &ABAVal) -> ConsensusResult<()> {
+        debug!(
+            "processing aba prom tiemstamp {} height {}",
+            aba_prom.timestamp, aba_prom.height
+        );
+        aba_prom.verify()?;
+        let values = self
+            .aba_prom_values
+            .entry((aba_prom.timestamp, aba_prom.height, aba_prom.round))
+            .or_insert([HashSet::new(), HashSet::new()]);
+        if values[aba_prom.val].insert(aba_prom.author) {
+            let mux_flags = self
+                .aba_mux_flags
+                .entry((aba_prom.timestamp, aba_prom.height, aba_prom.round))
+                .or_insert([false, false]);
+
+            if !mux_flags[0] && !mux_flags[1] {
+                let nums_opt = values[OPT as usize].len();
+                let nums_pes = values[PES as usize].len();
+                if nums_opt + nums_pes >= self.committee.quorum_threshold() as usize {
+                    let value_flags = self
+                        .aba_values_flag
+                        .entry((aba_prom.timestamp, aba_prom.height, aba_prom.round))
+                        .or_insert([false, false]);
+                    if value_flags[0] && value_flags[1] {
+                        mux_flags[0] = nums_opt > 0;
+                        mux_flags[1] = nums_pes > 1;
+                    } else if value_flags[0] {
+                        mux_flags[0] = nums_opt >= self.committee.quorum_threshold() as usize;
+                    } else {
+                        mux_flags[1] = nums_pes >= self.committee.quorum_threshold() as usize;
+                    }
+                }
+                if mux_flags[0] && mux_flags[1] {
+                    self.invoke_random_share_coin(
+                        aba_prom.timestamp,
+                        aba_prom.height,
+                        aba_prom.round,
+                    )
+                    .await?;
+                } else if mux_flags[0] || mux_flags[1] {
+                    self.process_aba_output(
+                        aba_prom.timestamp,
+                        aba_prom.height,
+                        aba_prom.round,
+                        aba_prom.val,
+                    )
+                    .await?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn invoke_random_share_coin(
+        &mut self,
+        timestamp: u128,
+        height: SeqNumber,
+        round: SeqNumber,
+    ) -> ConsensusResult<()> {
+        if self.aba_share_flags.insert((timestamp, height, round)) {
+            let share = RandomnessShare::new(
+                timestamp,
+                height,
+                round,
+                self.name,
+                self.signature_service.clone(),
+            )
+            .await;
+            let message = ConsensusMessage::ABACoinShareMsg(share.clone());
+            Synchronizer::transmit(
+                message,
+                &self.name,
+                None,
+                &self.network_filter,
+                &self.committee,
+            )
+            .await?;
+            self.handle_aba_share(&share).await?;
+        }
         Ok(())
     }
 
@@ -622,38 +742,10 @@ impl Core {
                 )
                 .await?;
             }
-            info!("ABA(epoch {},height {}) ouput {}", timestamp, height, val);
-            self.aba_ends.insert((timestamp, height), val as u8);
-
-            self.aba_ends_nums
-                .entry((timestamp, val as u8))
-                .or_insert(HashSet::new())
-                .insert(height);
-            let opt_num = self
-                .aba_ends_nums
-                .entry((timestamp, OPT))
-                .or_insert(HashSet::new())
-                .len();
-            let pes_num = self
-                .aba_ends_nums
-                .entry((timestamp, PES))
-                .or_insert(HashSet::new())
-                .len();
-
-            //step2. wait 2f+1
-            if opt_num as Stake == self.committee.quorum_threshold() {
-                for height in 0..(self.committee.size() as SeqNumber) {
-                    if !self.aba_invoke_flags.contains(&(timestamp, height)) {
-                        self.invoke_aba(timestamp, height, PES).await?;
-                    }
-                }
-            }
-
-            //step3. receive all aba output?
-            if opt_num + pes_num == self.committee.size() {
-                // self.handle_epoch_end(timestamp).await?;
-            }
+            self.process_negotiation_output(timestamp, height, val as u8)
+                .await?;
         }
+
         Ok(())
     }
 
@@ -698,22 +790,28 @@ impl Core {
 
     async fn handle_sync_request(
         &mut self,
-        digest: Digest,
+        timestamp: u128,
+        height: SeqNumber,
         sender: PublicKey,
     ) -> ConsensusResult<()> {
-        debug!("processing sync request digest {}", digest);
-        let key = digest.to_vec();
-        if let Some(bytes) = self.store.read(key).await? {
-            let block = bincode::deserialize(&bytes)?;
-            let message = ConsensusMessage::SyncReplyMsg(block);
-            Synchronizer::transmit(
-                message,
-                &self.name,
-                Some(&sender),
-                &self.network_filter,
-                &self.committee,
-            )
-            .await?;
+        debug!(
+            "processing sync request timestamp {} height {}",
+            timestamp, height
+        );
+        if let Some(digest) = self.arbc_proposal.get(&(timestamp, height)) {
+            let key = digest.to_vec();
+            if let Some(bytes) = self.store.read(key).await? {
+                let block = bincode::deserialize(&bytes)?;
+                let message = ConsensusMessage::SyncReplyMsg(block);
+                Synchronizer::transmit(
+                    message,
+                    &self.name,
+                    Some(&sender),
+                    &self.network_filter,
+                    &self.committee,
+                )
+                .await?;
+            }
         }
         Ok(())
     }
@@ -725,6 +823,8 @@ impl Core {
         );
         block.verify(&self.committee)?;
         self.store_block(block).await;
+        self.process_negotiation_output(block.timestamp, block.height, OPT)
+            .await?;
         Ok(())
     }
 
@@ -746,7 +846,7 @@ impl Core {
                         ConsensusMessage::ABACoinShareMsg(share)=>self.handle_aba_share(&share).await,
                         ConsensusMessage::ABAOutputMsg(output)=>self.handle_aba_output(&output).await,
                         ConsensusMessage::LoopBackMsg(block) => self.handle_negotiation_loopback(&block).await,
-                        ConsensusMessage::SyncRequestMsg(digest, sender) => self.handle_sync_request(digest, sender).await,
+                        ConsensusMessage::SyncRequestMsg(ts,height, sender) => self.handle_sync_request(ts,height, sender).await,
                         ConsensusMessage::SyncReplyMsg(block) => self.handle_sync_reply(&block).await,
                         ConsensusMessage::NotifyPassMsg(ts)=> self.handle_notify_pass(ts).await,
                         ConsensusMessage::SuperMVDelayMsg(proposal,timeout)=>{

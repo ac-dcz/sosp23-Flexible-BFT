@@ -5,7 +5,7 @@ use crate::error::{ConsensusError, ConsensusResult};
 use crate::filter::FilterInput;
 use crate::mempool::MempoolDriver;
 use crate::messages::{
-    ABAOutput, ABAVal, Block, EndorseVote, PromiseVote, Proposal, RandomnessShare,
+    ABAOutput, ABAVal, Block, EndorseVote, PassMechanism, PromiseVote, Proposal, RandomnessShare,
 };
 use crate::synchronizer::Synchronizer;
 use async_recursion::async_recursion;
@@ -50,6 +50,7 @@ pub enum ConsensusMessage {
     ABACoinShareMsg(RandomnessShare),
     ABAOutputMsg(ABAOutput),
     NotifyPassMsg(u128),
+    PassMsg(PassMechanism),
     LoopBackMsg(Block),
     SyncRequestMsg(u128, SeqNumber, PublicKey),
     SyncReplyMsg(Block),
@@ -76,6 +77,7 @@ pub struct Core {
     aggregator: Aggregator,
     arbc_proposal: HashMap<(u128, SeqNumber), Digest>,
     arbc_endorse: HashSet<(u128, SeqNumber)>,
+    arbc_instance: HashSet<(u128, SeqNumber)>,
     arbc_output_flag: HashSet<(u128, SeqNumber)>,
     aba_invoke_flags: HashSet<(u128, SeqNumber)>,
     aba_values: HashMap<(u128, SeqNumber, SeqNumber), [HashSet<PublicKey>; 2]>,
@@ -133,6 +135,7 @@ impl Core {
             arbc_proposal: HashMap::new(),
             arbc_endorse: HashSet::new(),
             arbc_output_flag: HashSet::new(),
+            arbc_instance: HashSet::new(),
             aba_invoke_flags: HashSet::new(),
             aba_values: HashMap::new(),
             aba_mux_values: HashMap::new(),
@@ -240,10 +243,15 @@ impl Core {
         }
         let digest = proposal.block.digest();
         self.store_block(&proposal.block).await;
-        // instance uodate
-        self.commitor
-            .add_instance(proposal.timestamp, proposal.height)
-            .await?;
+        if self
+            .arbc_instance
+            .insert((proposal.timestamp, proposal.height))
+        {
+            // instance uodate
+            self.commitor
+                .add_instance(proposal.timestamp, proposal.height)
+                .await?;
+        }
         if proposal.timestamp > self.pass_ts {
             if let Some(vote) = self
                 .make_endorse_vote(proposal.timestamp, proposal.height, digest, ENDORSED)
@@ -284,7 +292,7 @@ impl Core {
     }
 
     async fn make_endorse_vote(
-        &mut self,
+        &self,
         timestamp: u128,
         height: SeqNumber,
         digest: Digest,
@@ -309,6 +317,7 @@ impl Core {
     async fn handle_negotiation_endorse(&mut self, vote: &EndorseVote) -> ConsensusResult<()> {
         debug!("Processing {}", vote);
         vote.verify(&self.committee)?;
+        self.arbc_instance.insert((vote.timestamp, vote.height));
         if let Some((flag, val)) = self.aggregator.add_arbc_endorse_vote(vote)? {
             if flag {
                 let promise = PromiseVote::new(
@@ -338,6 +347,7 @@ impl Core {
     async fn handle_negotiation_promise(&mut self, vote: &PromiseVote) -> ConsensusResult<()> {
         debug!("Processing {}", vote);
         vote.verify(&self.committee)?;
+        self.arbc_instance.insert((vote.timestamp, vote.height));
         if let Some(signal) = self.aggregator.add_arbc_promise_vote(vote)? {
             //end
             self.process_negotiation_output(vote.timestamp, vote.height, signal)
@@ -367,6 +377,11 @@ impl Core {
                     self.commitor
                         .add_output(timestamp, height, Some(digest))
                         .await?;
+
+                    //send
+                    if height == self.height {
+                        self.generate_arbc_proposal().await?;
+                    }
                 } else {
                     self.synchronizer.block_request(timestamp, height).await?;
                 }
@@ -784,6 +799,74 @@ impl Core {
 
     /***************PASS mechanism********************/
     async fn handle_notify_pass(&mut self, ts: u128) -> ConsensusResult<()> {
+        // 1. update pass_ts
+        self.pass_ts = ts;
+        let mut endorse = Vec::new();
+        for (ts, h) in &self.arbc_endorse {
+            endorse.push((*ts, *h))
+        }
+        self.arbc_endorse.clear();
+
+        let pass = PassMechanism::new(
+            self.name,
+            self.height,
+            ts,
+            endorse,
+            self.signature_service.clone(),
+        )
+        .await;
+
+        let message = ConsensusMessage::PassMsg(pass.clone());
+
+        Synchronizer::transmit(
+            message,
+            &self.name,
+            None,
+            &self.network_filter,
+            &self.committee,
+        )
+        .await?;
+        self.handle_pass_mechanism(&pass).await?;
+        Ok(())
+    }
+
+    async fn handle_pass_mechanism(&mut self, pass: &PassMechanism) -> ConsensusResult<()> {
+        debug!("processing {:?}", pass);
+        pass.verify(&self.committee)?;
+
+        for (ts, h) in &pass.endorse {
+            if self.arbc_endorse.insert((*ts, *h)) {
+                self.commitor.add_instance(*ts, *h).await?;
+            }
+        }
+        self.all_pass_ts[pass.height as usize] = pass.timestamp;
+
+        let mut temp = self.all_pass_ts.clone();
+        temp.sort();
+        let index = (self.committee.random_coin_threshold() - 1) as usize;
+        let exec = temp[index];
+
+        for (ts, h) in self.arbc_instance.clone() {
+            if ts <= exec {
+                if let Some(vote) = self
+                    .make_endorse_vote(ts, h, Digest::default(), ABORT)
+                    .await
+                {
+                    let message = ConsensusMessage::EndorseMsg(vote.clone());
+                    Synchronizer::transmit(
+                        message,
+                        &self.name,
+                        None,
+                        &self.network_filter,
+                        &self.committee,
+                    )
+                    .await?;
+                    self.handle_negotiation_endorse(&vote).await?;
+                }
+            }
+        }
+        // 更新 exec_ts
+        self.commitor.update_exec(exec).await?;
         Ok(())
     }
     /***************PASS mechanism********************/
@@ -849,6 +932,7 @@ impl Core {
                         ConsensusMessage::SyncRequestMsg(ts,height, sender) => self.handle_sync_request(ts,height, sender).await,
                         ConsensusMessage::SyncReplyMsg(block) => self.handle_sync_reply(&block).await,
                         ConsensusMessage::NotifyPassMsg(ts)=> self.handle_notify_pass(ts).await,
+                        ConsensusMessage::PassMsg(pass)=>self.handle_pass_mechanism(&pass).await,
                         ConsensusMessage::SuperMVDelayMsg(proposal,timeout)=>{
                             pending_super_mv.push(Self::delay_super_mv(proposal, timeout));
                             Ok(())

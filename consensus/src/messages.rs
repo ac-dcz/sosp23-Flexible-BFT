@@ -532,3 +532,67 @@ impl fmt::Debug for RandomnessShare {
     }
 }
 /************************** Share Coin Struct **************************/
+
+/************************** Pass mechanism Struct **************************/
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PassMechanism {
+    pub author: PublicKey,
+    pub height: SeqNumber,
+    pub timestamp: u128,
+    pub endorse: Vec<(u128, SeqNumber)>,
+    pub signature: Signature,
+}
+
+impl PassMechanism {
+    pub async fn new(
+        author: PublicKey,
+        height: SeqNumber,
+        timestamp: u128,
+        endorse: Vec<(u128, SeqNumber)>,
+        mut signature_service: SignatureService,
+    ) -> Self {
+        let mut pass = Self {
+            author,
+            height,
+            timestamp,
+            endorse,
+            signature: Signature::default(),
+        };
+        pass.signature = signature_service.request_signature(pass.digest()).await;
+        return pass;
+    }
+
+    pub fn verify(&self, committee: &Committee) -> ConsensusResult<()> {
+        // Ensure the authority has voting rights.
+        ensure!(
+            committee.stake(&self.author) > 0,
+            ConsensusError::UnknownAuthority(self.author)
+        );
+
+        // Check the signature.
+        self.signature.verify(&self.digest(), &self.author)?;
+        Ok(())
+    }
+}
+
+impl Hash for PassMechanism {
+    fn digest(&self) -> Digest {
+        let mut hasher = Sha512::new();
+        hasher.update(self.author.0);
+        hasher.update(self.height.to_le_bytes());
+        hasher.update(self.timestamp.to_le_bytes());
+        Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
+    }
+}
+
+impl fmt::Debug for PassMechanism {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(
+            f,
+            "PassMechanism (author {},timestamp {} ,height {})",
+            self.author, self.timestamp, self.height,
+        )
+    }
+}
+/************************** Pass mechanism Struct **************************/

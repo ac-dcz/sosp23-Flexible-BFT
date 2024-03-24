@@ -101,14 +101,14 @@ class LogParser:
         if search(r'panic', log) is not None:
             raise ParseError('Client(s) panicked')
 
-        tmp_p = findall(r'\[(.*Z) .* Created B(\d+)\(([^ ]+)\) epoch (\d+)', log)
+        tmp_p = findall(r'\[(.*Z) .* Created B(\d+)\(([^ ]+)\) timestamp (\d+)', log)
         tmp = [(d, self._to_posix(t)) for t, _, d, _ in tmp_p]
         proposals = self._merge_results([tmp])
         
         tmp = [(d+h+"="+e, self._to_posix(t)) for t, h, d, e in tmp_p]
         h_proposals = self._merge_results([tmp])
 
-        tmp_c = findall(r'\[(.*Z) .* Committed B(\d+)\(([^ ]+)\) epoch (\d+)', log)
+        tmp_c = findall(r'\[(.*Z) .* Committed B(\d+)\(([^ ]+)\) timestamp (\d+)', log)
         tmp = [(d, self._to_posix(t)) for t, _, d, _ in tmp_c]
         commits = self._merge_results([tmp])
 

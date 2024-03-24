@@ -63,10 +63,34 @@ impl Commitor {
                         instance.push(Reverse((ts, h)));
                     }
                     CommitMessage::UpdateExec(exec) => {
-                        if exec > exec_ts {
+                        if exec >= exec_ts {
                             exec_ts = exec;
                         }
-                        //try to commit
+                        // try to commit
+                        let (mut c_ts, mut c_h) = (0, 0);
+                        let mut commits: Vec<Digest> = Vec::new();
+                        while let Some(val) = instance.peek() {
+                            let (ts, h) = val.clone().0;
+                            let flag = commit_map.contains_key(&(ts, h));
+                            if flag && ts <= exec_ts {
+                                if let Some(block) = commit_map.remove(&(ts, h)).unwrap() {
+                                    commits.push(block);
+                                }
+                                let _ = instance.pop();
+                                (c_ts, c_h) = (ts, h);
+                            } else {
+                                break;
+                            }
+                        }
+                        if commits.len() > 0 {
+                            //清理缓存
+                            if let Err(err) = tx_clean.send((commits.clone(), c_ts, c_h)).await {
+                                panic!("Failed to send message through clean channel: {}", err);
+                            }
+                            if let Err(e) = try_to_commit(commits, store.clone()).await {
+                                warn!("commit error: {}", e);
+                            }
+                        }
                     }
                     CommitMessage::ArbcOutput(ts, height, block) => {
                         commit_map.insert((ts, height), block); //有哪些区块被提交
@@ -76,10 +100,12 @@ impl Commitor {
                         let mut flag = false;
                         while commit_instance.len() as Stake >= committee.quorum_threshold() {
                             let (ps, _) = commit_instance.peek().unwrap().clone().0;
-                            if ps > pass_ts {
+                            if ps >= pass_ts {
                                 flag = true;
                                 pass_ts = ps;
                                 let _ = commit_instance.pop();
+                            } else {
+                                break;
                             }
                         }
                         if flag {
@@ -89,30 +115,6 @@ impl Commitor {
                             }
                         }
                         //try to commit
-                    }
-                }
-
-                // try to commit
-                let (mut c_ts, mut c_h) = (0, 0);
-                let mut commits: Vec<Digest> = Vec::new();
-                while let Some(val) = instance.peek() {
-                    let (ts, h) = val.clone().0;
-                    let flag = commit_map.contains_key(&(ts, h));
-                    if flag && ts <= exec_ts {
-                        if let Some(block) = commit_map.remove(&(ts, h)).unwrap() {
-                            commits.push(block);
-                        }
-                        let _ = instance.pop();
-                        (c_ts, c_h) = (ts, h);
-                    }
-                }
-                if commits.len() > 0 {
-                    //清理缓存
-                    if let Err(err) = tx_clean.send((commits.clone(), c_ts, c_h)).await {
-                        panic!("Failed to send message through clean channel: {}", err);
-                    }
-                    if let Err(e) = try_to_commit(commits, store.clone()).await {
-                        warn!("commit error: {}", e);
                     }
                 }
             }

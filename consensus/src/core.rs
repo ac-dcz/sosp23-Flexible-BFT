@@ -176,11 +176,26 @@ impl Core {
     ) -> ConsensusResult<()> {
         self.aggregator.cleanup(timestamp, height);
         self.mempool_driver.cleanup(digest, timestamp, height).await;
-        // self.aba_values.retain(|(e, ..), _| *e > epoch);
-        // self.aba_mux_values.retain(|(e, ..), _| *e > epoch);
-        // self.aba_values_flag.retain(|(e, ..), _| *e > epoch);
-        // self.aba_mux_flags.retain(|(e, ..), _| *e > epoch);
-
+        self.arbc_proposal
+            .retain(|(ts, h), _| *ts > timestamp || (*ts == timestamp && *h > height));
+        // self.arbc_instance
+        //     .retain(|(ts, h)| *ts > timestamp || (*ts == timestamp && *h > height));
+        self.arbc_output_flag
+            .retain(|(ts, h)| *ts > timestamp || (*ts == timestamp && *h > height));
+        self.aba_values
+            .retain(|(ts, h, _), _| *ts > timestamp || (*ts == timestamp && *h > height));
+        self.aba_values_flag
+            .retain(|(ts, h, _), _| *ts > timestamp || (*ts == timestamp && *h > height));
+        self.aba_mux_values
+            .retain(|(ts, h, _), _| *ts > timestamp || (*ts == timestamp && *h > height));
+        self.aba_mux_flags
+            .retain(|(ts, h, _), _| *ts > timestamp || (*ts == timestamp && *h > height));
+        self.aba_prom_values
+            .retain(|(ts, h, _), _| *ts > timestamp || (*ts == timestamp && *h > height));
+        self.aba_share_flags
+            .retain(|(ts, h, _)| *ts > timestamp || (*ts == timestamp && *h > height));
+        self.aba_outputs
+            .retain(|(ts, h, _), _| *ts > timestamp || (*ts == timestamp && *h > height));
         Ok(())
     }
 
@@ -210,7 +225,7 @@ impl Core {
                     "Created B{}({}) timestamp {}",
                     block.height,
                     base64::encode(x),
-                    block.tiemstamp
+                    block.timestamp
                 );
             }
         }
@@ -252,6 +267,7 @@ impl Core {
                 .add_instance(proposal.timestamp, proposal.height)
                 .await?;
         }
+        // endorse
         if proposal.timestamp > self.pass_ts {
             if let Some(vote) = self
                 .make_endorse_vote(proposal.timestamp, proposal.height, digest, ENDORSED)
@@ -362,6 +378,10 @@ impl Core {
         height: SeqNumber,
         tag: u8,
     ) -> ConsensusResult<()> {
+        debug!(
+            "processing ARBC output timestamp {} height {} tag {}",
+            timestamp, height, tag
+        );
         if !self.arbc_output_flag.contains(&(timestamp, height)) {
             if tag == PES {
                 self.arbc_output_flag.insert((timestamp, height));
@@ -727,7 +747,7 @@ impl Core {
         val: usize,
     ) -> ConsensusResult<()> {
         debug!(
-            "ABA(epoch {} height {}) end output({})",
+            "ABA(timestamp {} height {}) end output({})",
             timestamp, height, val
         );
 
@@ -799,6 +819,7 @@ impl Core {
 
     /***************PASS mechanism********************/
     async fn handle_notify_pass(&mut self, ts: u128) -> ConsensusResult<()> {
+        debug!("notify pass timestamp {}", ts);
         // 1. update pass_ts
         self.pass_ts = ts;
         let mut endorse = Vec::new();
@@ -835,7 +856,7 @@ impl Core {
         pass.verify(&self.committee)?;
 
         for (ts, h) in &pass.endorse {
-            if self.arbc_endorse.insert((*ts, *h)) {
+            if self.arbc_instance.insert((*ts, *h)) {
                 self.commitor.add_instance(*ts, *h).await?;
             }
         }
@@ -845,6 +866,8 @@ impl Core {
         temp.sort();
         let index = (self.committee.random_coin_threshold() - 1) as usize;
         let exec = temp[index];
+        // 更新 exec_ts
+        self.commitor.update_exec(exec).await?;
 
         for (ts, h) in self.arbc_instance.clone() {
             if ts <= exec {
@@ -865,8 +888,6 @@ impl Core {
                 }
             }
         }
-        // 更新 exec_ts
-        self.commitor.update_exec(exec).await?;
         Ok(())
     }
     /***************PASS mechanism********************/

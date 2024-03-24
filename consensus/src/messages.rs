@@ -540,6 +540,7 @@ pub struct PassMechanism {
     pub author: PublicKey,
     pub height: SeqNumber,
     pub timestamp: u128,
+    pub seq: SeqNumber,
     pub endorse: Vec<(u128, SeqNumber)>,
     pub signature: Signature,
 }
@@ -548,6 +549,7 @@ impl PassMechanism {
     pub async fn new(
         author: PublicKey,
         height: SeqNumber,
+        seq: SeqNumber,
         timestamp: u128,
         endorse: Vec<(u128, SeqNumber)>,
         mut signature_service: SignatureService,
@@ -556,6 +558,7 @@ impl PassMechanism {
             author,
             height,
             timestamp,
+            seq,
             endorse,
             signature: Signature::default(),
         };
@@ -580,6 +583,7 @@ impl Hash for PassMechanism {
     fn digest(&self) -> Digest {
         let mut hasher = Sha512::new();
         hasher.update(self.author.0);
+        hasher.update(self.seq.to_le_bytes());
         hasher.update(self.height.to_le_bytes());
         hasher.update(self.timestamp.to_le_bytes());
         Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())

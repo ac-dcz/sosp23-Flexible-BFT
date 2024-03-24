@@ -74,6 +74,9 @@ pub struct Core {
     height: SeqNumber,
     pass_ts: u128,
     all_pass_ts: Vec<u128>,
+    seq: SeqNumber,
+    pass_seq: HashMap<SeqNumber, SeqNumber>,
+    pass_message: HashMap<SeqNumber, HashMap<SeqNumber, PassMechanism>>,
     aggregator: Aggregator,
     arbc_proposal: HashMap<(u128, SeqNumber), Digest>,
     arbc_endorse: HashSet<(u128, SeqNumber)>,
@@ -114,6 +117,7 @@ impl Core {
             all_pass_ts.push(0);
         }
         Self {
+            seq: 0,
             all_pass_ts,
             pass_ts: 0,
             height: committee.id(name) as u64,
@@ -145,6 +149,8 @@ impl Core {
             aba_share_flags: HashSet::new(),
             aba_outputs: HashMap::new(),
             aba_ends: HashMap::new(),
+            pass_seq: HashMap::new(),
+            pass_message: HashMap::new(),
         }
     }
 
@@ -827,16 +833,16 @@ impl Core {
             endorse.push((*ts, *h))
         }
         self.arbc_endorse.clear();
-
         let pass = PassMechanism::new(
             self.name,
             self.height,
+            self.seq,
             ts,
             endorse,
             self.signature_service.clone(),
         )
         .await;
-
+        self.seq += 1;
         let message = ConsensusMessage::PassMsg(pass.clone());
 
         Synchronizer::transmit(
@@ -855,19 +861,30 @@ impl Core {
         debug!("processing {:?}", pass);
         pass.verify(&self.committee)?;
 
-        for (ts, h) in &pass.endorse {
-            if self.arbc_instance.insert((*ts, *h)) {
-                self.commitor.add_instance(*ts, *h).await?;
+        let values = self
+            .pass_message
+            .entry(pass.height)
+            .or_insert(HashMap::new());
+        values.insert(pass.seq, pass.clone());
+        let mut exec = 0;
+        let seq = self.pass_seq.entry(pass.height).or_insert(0);
+        while values.contains_key(&seq) {
+            let seq_pass = values.remove(&seq).unwrap();
+            for (ts, h) in &seq_pass.endorse {
+                if self.arbc_instance.insert((*ts, *h)) {
+                    self.commitor.add_instance(*ts, *h).await?;
+                }
             }
-        }
-        self.all_pass_ts[pass.height as usize] = pass.timestamp;
+            self.all_pass_ts[seq_pass.height as usize] = seq_pass.timestamp;
 
-        let mut temp = self.all_pass_ts.clone();
-        temp.sort();
-        let index = (self.committee.random_coin_threshold() - 1) as usize;
-        let exec = temp[index];
-        // 更新 exec_ts
-        self.commitor.update_exec(exec).await?;
+            let mut temp = self.all_pass_ts.clone();
+            temp.sort();
+            let index = (self.committee.random_coin_threshold() - 1) as usize;
+            exec = temp[index];
+            // 更新 exec_ts
+            self.commitor.update_exec(exec).await?;
+            *seq += 1;
+        }
 
         for (ts, h) in self.arbc_instance.clone() {
             if ts <= exec {

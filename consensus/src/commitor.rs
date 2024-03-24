@@ -1,12 +1,12 @@
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::u128;
 
 use crate::config::Stake;
 use crate::error::ConsensusResult;
 use crate::{Block, Committee, ConsensusMessage, SeqNumber};
 use crypto::Digest;
-use log::{info, warn};
+use log::{debug, info, warn};
 use store::Store;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -51,6 +51,7 @@ impl Commitor {
         tx_clean: Sender<(Vec<Digest>, u128, SeqNumber)>,
     ) -> Self {
         let (tx_channel, mut rx_channel): (_, Receiver<CommitMessage>) = channel(1000);
+        let mut used = HashSet::new();
         let mut instance = BinaryHeap::new();
         let (mut exec_ts, mut pass_ts): (u128, u128) = (0, 0);
         let mut commit_map: HashMap<(u128, SeqNumber), Option<Digest>> = HashMap::new();
@@ -60,7 +61,9 @@ impl Commitor {
             while let Some(message) = rx_channel.recv().await {
                 match message {
                     CommitMessage::AddInstance(ts, h) => {
-                        instance.push(Reverse((ts, h)));
+                        if used.insert((ts, h)) {
+                            instance.push(Reverse((ts, h)));
+                        }
                     }
                     CommitMessage::UpdateExec(exec) => {
                         if exec >= exec_ts {
@@ -72,6 +75,7 @@ impl Commitor {
                         while let Some(val) = instance.peek() {
                             let (ts, h) = val.clone().0;
                             let flag = commit_map.contains_key(&(ts, h));
+                            debug!("try to commit min_ts {} min_h {}, exec_ts {}", ts, h, exec);
                             if flag && ts <= exec_ts {
                                 if let Some(block) = commit_map.remove(&(ts, h)).unwrap() {
                                     commits.push(block);
@@ -99,14 +103,13 @@ impl Commitor {
                         //try to pass
                         let mut flag = false;
                         while commit_instance.len() as Stake >= committee.quorum_threshold() {
-                            let (ps, _) = commit_instance.peek().unwrap().clone().0;
+                            let (ps, h) = commit_instance.peek().unwrap().clone().0;
+                            debug!("try to notify timestamp {} height {}", ps, h);
                             if ps >= pass_ts {
                                 flag = true;
                                 pass_ts = ps;
-                                let _ = commit_instance.pop();
-                            } else {
-                                break;
                             }
+                            let _ = commit_instance.pop();
                         }
                         if flag {
                             let message = ConsensusMessage::NotifyPassMsg(pass_ts);
@@ -132,6 +135,7 @@ impl Commitor {
     }
 
     pub async fn update_exec(&mut self, ts: u128) -> ConsensusResult<()> {
+        debug!("update exec {}", ts);
         let message = CommitMessage::UpdateExec(ts);
         if let Err(e) = self.tx_channel.send(message).await {
             panic!("Failed to send message through commit channel: {}", e);
@@ -145,6 +149,7 @@ impl Commitor {
         h: SeqNumber,
         digest: Option<Digest>,
     ) -> ConsensusResult<()> {
+        debug!("add output timestamp {} height {}", ts, h);
         let message = CommitMessage::ArbcOutput(ts, h, digest);
         if let Err(e) = self.tx_channel.send(message).await {
             panic!("Failed to send message through commit channel: {}", e);

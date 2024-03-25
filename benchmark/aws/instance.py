@@ -16,8 +16,8 @@ class AWSError(Exception):
 
 
 class InstanceManager:
-    INSTANCE_NAME = 'flexible-HBBFT'
-    SECURITY_GROUP_NAME = 'flexible-HBBFT'
+    INSTANCE_NAME = 'MyTumbler'
+    SECURITY_GROUP_NAME = 'MyTumbler'
 
     def __init__(self, settings):
         assert isinstance(settings, Settings)
@@ -68,7 +68,7 @@ class InstanceManager:
 
     def _create_security_group(self, client):
         client.create_security_group(
-            Description='flexible-HBBFT node',
+            Description='MyTumbler node',
             GroupName=self.SECURITY_GROUP_NAME,
         )
 

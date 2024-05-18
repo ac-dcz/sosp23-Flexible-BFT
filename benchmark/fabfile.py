@@ -13,8 +13,8 @@ def local(ctx):
     ''' Run benchmarks on localhost '''
     bench_params = {
         'nodes': 4,
-        'rate': 1000,
-        'tx_size': 512,
+        'rate': 10_000,
+        'tx_size': 16,
         'faults': 0,
         'duration': 30,
     }
@@ -27,8 +27,9 @@ def local(ctx):
             'min_block_delay': 0,
             'network_delay': 20_000, # message delay on the leaders' proposals during DDoS
             'ddos': False, # True for DDoS attack on the leader, False otherwise
-            'random_ddos': True,
+            'random_ddos': False,
             'random_chance': 10,
+            'fault': 0,
             'exp': 1 # multiplicative factor for exponential fallback
         },
         'mempool': {
@@ -166,6 +167,9 @@ def kill(ctx):
 def logs(ctx):
     ''' Print a summary of the logs '''
     # try:
-    print(LogParser.process('./logs').result())
+    LogParser.process('./logs').print(
+        "./results/results.txt",
+        "./results/tx_times.txt"
+    )
     # except ParseError as e:
     #     Print.error(BenchError('Failed to parse logs', e))
